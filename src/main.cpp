@@ -1,5 +1,5 @@
-#include <LGFX.hpp>
-#include <lvgl.h>
+// This is the serial only version
+
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -31,8 +31,6 @@
 
 #define TAG "merged"
 
-LGFX lcd;
-wl_handle_t wl_handle = WL_INVALID_HANDLE;
 SemaphoreHandle_t wifi_connected = NULL;
 
 struct HttpData {
@@ -42,422 +40,24 @@ struct HttpData {
     cJSON *grounding_metadata = nullptr;
 };
 
-void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *color_p) {
-    uint32_t w = lv_area_get_width(area);
-    uint32_t h = lv_area_get_height(area);
-    lcd.startWrite();
-    lcd.setAddrWindow(area->x1, area->y1, w, h);
-    lcd.writePixelsDMA((uint16_t *)color_p, w * h, true);
-    lcd.endWrite();
-    lv_display_flush_ready(disp);
-}
-
-static uint32_t get_tick_ms(void) {
-    return (uint32_t)(esp_timer_get_time() / 1000);
-}
-
-static void touch_read(lv_indev_t *indev, lv_indev_data_t *data) {
-    int x = 0, y = 0;
-    if (lcd.getTouch(&x, &y)) {
-        data->point.x = x;
-        data->point.y = y;
-        data->state = LV_INDEV_STATE_PRESSED;
-    } else {
-        data->state = LV_INDEV_STATE_RELEASED;
-    }
-}
-
-static bool load_calibration_data(uint16_t caldata[8]) {
-    if (wl_handle == WL_INVALID_HANDLE) {
-        return false;
-    }
-    FILE *f = fopen("/storage/caldata.json", "r");
-    if (!f) {
-        return false;
-    }
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *json_str = (char *)malloc(len + 1);
-    if (!json_str) {
-        fclose(f);
-        return false;
-    }
-    size_t read_bytes = fread(json_str, 1, len, f);
-    json_str[len] = '\0';
-    fclose(f);
-    if (read_bytes != (size_t)len) {
-        free(json_str);
-        return false;
-    }
-    cJSON *root = cJSON_Parse(json_str);
-    free(json_str);
-    if (!root || !cJSON_IsArray(root) || cJSON_GetArraySize(root) != 8) {
-        cJSON_Delete(root);
-        return false;
-    }
-    bool success = true;
-    for (int i = 0; i < 8; ++i) {
-        cJSON *item = cJSON_GetArrayItem(root, i);
-        if (!item || !cJSON_IsNumber(item)) {
-            success = false;
-            break;
-        }
-        caldata[i] = (uint16_t)cJSON_GetNumberValue(item);
-    }
-    cJSON_Delete(root);
-    ESP_LOGI(TAG, "Calibration data loaded from JSON file.");
-    return success;
-}
-
-static bool save_calibration_data(const uint16_t caldata[8]) {
-    if (wl_handle == WL_INVALID_HANDLE) {
-        ESP_LOGW(TAG, "Cannot save calibration data: FATFS not mounted.");
-        return false;
-    }
-    cJSON *root = cJSON_CreateArray();
-    if (!root) {
-        return false;
-    }
-    for (int i = 0; i < 8; ++i) {
-        cJSON_AddItemToArray(root, cJSON_CreateNumber(caldata[i]));
-    }
-    char *json_str = cJSON_Print(root);
-    if (!json_str) {
-        cJSON_Delete(root);
-        return false;
-    }
-    FILE *f = fopen("/storage/caldata.json", "w");
-    if (!f) {
-        cJSON_free(json_str);
-        cJSON_Delete(root);
-        return false;
-    }
-    size_t json_len = strlen(json_str);
-    size_t written_bytes = fwrite(json_str, 1, json_len, f);
-    fclose(f);
-    cJSON_free(json_str);
-    cJSON_Delete(root);
-    if (written_bytes != json_len) {
-        ESP_LOGE(TAG, "Failed to write JSON to file.");
-        return false;
-    }
-    ESP_LOGI(TAG, "Calibration data saved to JSON file.");
-    return true;
-}
-
-static void perform_calibration(uint16_t caldata[8]) {
-    ESP_LOGI(TAG, "Performing touch calibration...");
-    lcd.calibrateTouch(caldata, lcd.color565(255, 0, 0), lcd.color565(0, 0, 0), 20);
-}
-
-lv_obj_t * home_list;
-lv_obj_t * home_cont;
-lv_obj_t * touch_ind;
-lv_obj_t * status_bar;
-lv_obj_t * gemini_cont;  // New global for Gemini screen container
-
-void cr_status_bar();
-void cr_home_scr();
-void cr_gemini_scr();
-static void open_gemini_cb(lv_event_t * e);
-static void close_gemini_cb(lv_event_t * e);
-
-void setup_home_scr(){
-    cr_status_bar();
-    cr_home_scr();
-}
-
-void cr_status_bar() {
-    status_bar = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(status_bar, LV_PCT(100), LV_PCT(15));
-    lv_obj_align(status_bar, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_pad_all(status_bar, 2, 0);
-    lv_obj_clear_flag(status_bar, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t * status_label = lv_label_create(status_bar);
-    lv_label_set_text(status_label, "Status: Ready");
-    lv_obj_align(status_label, LV_ALIGN_LEFT_MID, 0, 0);
-}
-
-void cr_home_scr(){
-    home_cont = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(home_cont, LV_PCT(100), LV_PCT(85));
-    lv_obj_clear_flag(home_cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_pad_all(home_cont, 0, 0);
-    lv_obj_align_to(home_cont, status_bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
-
-    home_list = lv_list_create(home_cont);
-    lv_obj_set_size(home_list, LV_PCT(100), LV_PCT(100));
-    lv_obj_align(home_list, LV_ALIGN_TOP_MID, 0, 0);
-
-    // Add buttons to the list
-    lv_obj_t * settings_btn = lv_list_add_btn(home_list, LV_SYMBOL_SETTINGS, "Settings");
-    lv_obj_t * gemini_btn = lv_list_add_btn(home_list, LV_SYMBOL_CHARGE, "Gemini AI");
-    lv_obj_t * weather_btn = lv_list_add_btn(home_list, LV_SYMBOL_GPS, "Weather");
-    lv_obj_t * about_btn = lv_list_add_btn(home_list, LV_SYMBOL_TINT, "About");
-
-    // Add click event to Gemini button
-    lv_obj_add_event_cb(gemini_btn, open_gemini_cb, LV_EVENT_CLICKED, NULL);
-}
-
-static void open_gemini_cb(lv_event_t * e) {
-    lv_obj_del(home_cont);
-    cr_gemini_scr();
-}
-
-// Placeholder for send callback (implement as needed)
-static void send_message_cb(lv_event_t * e) {
-    lv_obj_t * ta = (lv_obj_t *)lv_event_get_user_data(e);
-    const char * text = lv_textarea_get_text(ta);
-    // Handle sending text to Gemini AI (e.g., via API call)
-    lv_textarea_set_text(ta, "");
-    // Add response handling here, e.g., append to chat area
-}
-
-void cr_gemini_scr() {
-    gemini_cont = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(gemini_cont, LV_PCT(100), LV_PCT(85));
-    lv_obj_clear_flag(gemini_cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_pad_all(gemini_cont, 0, 0);
-    lv_obj_align_to(gemini_cont, status_bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
-
-    // Close button (moved to top-right for input bar space)
-    lv_obj_t * close_btn = lv_btn_create(gemini_cont);
-    lv_obj_set_size(close_btn, LV_PCT(15), LV_PCT(15));
-    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -10, 10);
-    lv_obj_add_event_cb(close_btn, close_gemini_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t * close_label = lv_label_create(close_btn);
-    lv_label_set_text(close_label, "Close");
-    lv_obj_center(close_label);
-
-    // Input bar at bottom mid
-    lv_obj_t * input_cont = lv_obj_create(gemini_cont);
-    lv_obj_set_size(input_cont, LV_PCT(90), LV_PCT(15));
-    lv_obj_set_style_border_width(input_cont, 1, 0);
-    lv_obj_set_style_border_color(input_cont, lv_color_hex(0xCCCCCC), 0);
-    lv_obj_set_style_pad_all(input_cont, 0, 0);
-    lv_obj_align(input_cont, LV_ALIGN_BOTTOM_MID, 0, -5);
-
-    lv_obj_t * input_ta = lv_textarea_create(input_cont);
-    lv_textarea_set_placeholder_text(input_ta, "Type your message...");
-    lv_textarea_set_one_line(input_ta, true);
-    lv_obj_set_width(input_ta, LV_PCT(80));
-    lv_obj_set_height(input_ta, LV_PCT(100));
-    lv_obj_align(input_ta, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_clear_flag(input_ta, LV_OBJ_FLAG_SCROLLABLE);
-
-    // Send button next to input
-    lv_obj_t * send_btn = lv_btn_create(input_cont);
-    lv_obj_set_width(send_btn, LV_PCT(20));
-    lv_obj_set_height(send_btn, LV_PCT(100));
-    lv_obj_set_style_pad_all(send_btn, 0, 0);
-    lv_obj_align(send_btn, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_add_event_cb(send_btn, send_message_cb, LV_EVENT_CLICKED, input_ta);  // Assuming send_message_cb handles sending
-
-    lv_obj_t * send_label = lv_label_create(send_btn);
-    lv_obj_set_style_pad_all(send_label, 0, 0);
-    lv_label_set_text(send_label, "Send");
-    lv_obj_center(send_label);
-}
-
-static void close_gemini_cb(lv_event_t * e) {
-    lv_obj_del(gemini_cont);
-    cr_home_scr();
-}
-
-void lvgl_task(void *pvParameters) {
-    // Create small canvas as touch indicator for custom cursor using points/lines
-    touch_ind = lv_canvas_create(lv_scr_act());
-    lv_obj_set_size(touch_ind, 20, 20);  // Precise 20x20 size
-
-    // Define buffer for ARGB8888 (true color alpha)
-    LV_DRAW_BUF_DEFINE_STATIC(draw_buf, 20, 20, LV_COLOR_FORMAT_ARGB8888);
-    LV_DRAW_BUF_INIT_STATIC(draw_buf);
-    lv_canvas_set_draw_buf(touch_ind, &draw_buf);
-
-    // Set transparent background
-    lv_obj_set_style_bg_opa(touch_ind, LV_OPA_TRANSP, 0);
-
-    // Initialize layer for drawing
-    lv_layer_t layer;
-    lv_canvas_init_layer(touch_ind, &layer);
-
-    // Draw horizontal line for crosshair cursor
-    lv_draw_line_dsc_t line_dsc;
-    lv_draw_line_dsc_init(&line_dsc);
-    line_dsc.color = lv_color_hex(0xFF0000);
-    line_dsc.width = 1;
-    line_dsc.round_start = 0;
-    line_dsc.round_end = 0;
-    line_dsc.p1.x = 0;
-    line_dsc.p1.y = 10;
-    line_dsc.p2.x = 19;
-    line_dsc.p2.y = 10;
-    lv_draw_line(&layer, &line_dsc);
-
-    // Draw vertical line for crosshair cursor
-    line_dsc.p1.x = 10;
-    line_dsc.p1.y = 0;
-    line_dsc.p2.x = 10;
-    line_dsc.p2.y = 19;
-    lv_draw_line(&layer, &line_dsc);
-
-    // Finish layer to apply drawings
-    lv_canvas_finish_layer(touch_ind, &layer);
-
-    lv_indev_set_cursor(lv_indev_get_next(NULL), touch_ind);
-
-    setup_home_scr();
-
-    while (1) {
-        lv_timer_handler();
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
-
-static esp_err_t mount_fatfs(void) {
-    ESP_LOGI(TAG, "--- Mounting FAT Filesystem ---");
-    const char *base_path = "/storage";
-    esp_vfs_fat_mount_config_t mount_config = {};
-    mount_config.format_if_mount_failed = true;
-    mount_config.max_files = 5;
-    mount_config.allocation_unit_size = CONFIG_WL_SECTOR_SIZE;
-
-    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(base_path, "fatfs", &mount_config, &wl_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to mount FATFS partition: %s", esp_err_to_name(err));
-        return err;
-    }
-    ESP_LOGI(TAG, "FATFS mounted successfully.");
-    
-    ESP_LOGI(TAG, "Listing all files and directories in /storage:");
-    DIR *dir = opendir("/storage");
-    if (dir) {
-        struct dirent *entry;
-        int item_count = 0;
-        while ((entry = readdir(dir)) != NULL) {
-            ESP_LOGI(TAG, "- %s (type: %d)", entry->d_name, entry->d_type);
-            item_count++;
-        }
-        closedir(dir);
-        ESP_LOGI(TAG, "Total items in /storage: %d", item_count);
-    } else {
-        ESP_LOGE(TAG, "Failed to open directory /storage for listing");
-    }
-    return ESP_OK;
-}
-
-static void init_display(void) {
-    lcd.init();
-    lcd.setRotation(1);
-    lcd.clear(lcd.color565(0, 0, 0));
-    lcd.setBrightness(255);
-
-    if (mount_fatfs() != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to mount FATFS");
-    }
-    
-    uint16_t caldata[8];
-    bool cal_loaded = load_calibration_data(caldata);
-    if (!cal_loaded) {
-        perform_calibration(caldata);
-        save_calibration_data(caldata);
-    }
-    lcd.setTouchCalibrate(caldata);
-
-    lv_init();
-    lv_tick_set_cb(get_tick_ms);
-
-    uint32_t width = lcd.width();
-    uint32_t height = lcd.height();
-    uint32_t buf_size_bytes = width * height;
-    uint32_t *disp_buf1 = (uint32_t *)malloc(buf_size_bytes);
-    uint32_t *disp_buf2 = (uint32_t *)malloc(buf_size_bytes);
-    if (!disp_buf1 || !disp_buf2) {
-        ESP_LOGE(TAG, "Failed to allocate display buffer");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    lv_display_t *disp = lv_display_create(width, height);
-    lv_display_set_flush_cb(disp, my_disp_flush);
-    lv_display_set_buffers(disp, disp_buf1, disp_buf2, buf_size_bytes * 2, LV_DISPLAY_RENDER_MODE_PARTIAL);
-
-    lv_indev_t *indev = lv_indev_create();
-    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_read_cb(indev, touch_read);
-    lv_indev_set_disp(indev, disp);
-}
-
-static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                               int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        esp_wifi_connect();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ESP_LOGI(TAG, "WiFi connected, got IP");
-        if (wifi_connected != NULL) {
-            xSemaphoreGive(wifi_connected);
-        }
-    }
-}
-
-static void init_console(void) {
-    // Configure UART for console I/O
-    uart_config_t uart_config = {};
-    uart_config.baud_rate = 115200;
-    uart_config.data_bits = UART_DATA_8_BITS;
-    uart_config.parity = UART_PARITY_DISABLE;
-    uart_config.stop_bits = UART_STOP_BITS_1;
-    uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
-    uart_config.source_clk = UART_SCLK_APB;
-
-    ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0));
-    ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
-    esp_vfs_dev_uart_use_driver(UART_NUM_0);
-
-    // Initialize console
-    esp_console_config_t console_config = {};
-    console_config.max_cmdline_length = 256;
-    console_config.max_cmdline_args = 8;
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-    console_config.hint_color = atoi("36"); // ANSI color code for cyan
-#endif
-
-    ESP_ERROR_CHECK(esp_console_init(&console_config));
-
-    linenoiseSetMultiLine(1);
-    linenoiseHistorySetMaxLen(10);
-    linenoiseAllowEmpty(false);
-}
-
 void print_citations(cJSON* metadata) {
-    if (!cJSON_HasObjectItem(metadata, "groundingSupports") || !cJSON_HasObjectItem(metadata, "groundingChunks")) {
-        return;
-    }
-
     cJSON *supports = cJSON_GetObjectItem(metadata, "groundingSupports");
     cJSON *chunks = cJSON_GetObjectItem(metadata, "groundingChunks");
-
-    if (!cJSON_IsArray(supports) || !cJSON_IsArray(chunks)) {
+    if (!supports || !chunks || !cJSON_IsArray(supports) || !cJSON_IsArray(chunks)) {
         return;
     }
 
+    int chunk_size = cJSON_GetArraySize(chunks);
     std::set<int> used_indices;
-    int num_sup = cJSON_GetArraySize(supports);
-    for (int i = 0; i < num_sup; i++) {
+    for (int i = 0; i < cJSON_GetArraySize(supports); i++) {
         cJSON *sup = cJSON_GetArrayItem(supports, i);
         cJSON *indices = cJSON_GetObjectItem(sup, "groundingChunkIndices");
         if (!indices || !cJSON_IsArray(indices)) continue;
-        int num_idx = cJSON_GetArraySize(indices);
-        for (int k = 0; k < num_idx; k++) {
+        for (int k = 0; k < cJSON_GetArraySize(indices); k++) {
             cJSON *i_json = cJSON_GetArrayItem(indices, k);
             if (!i_json || !cJSON_IsNumber(i_json)) continue;
             int idx = i_json->valueint;
-            if (idx >= 0 && idx < cJSON_GetArraySize(chunks)) {
+            if (idx >= 0 && idx < chunk_size) {
                 used_indices.insert(idx);
             }
         }
@@ -468,12 +68,18 @@ void print_citations(cJSON* metadata) {
     printf("\nCitations:\n");
     for (int idx : used_indices) {
         cJSON *chunk = cJSON_GetArrayItem(chunks, idx);
-        if (!chunk || !cJSON_HasObjectItem(chunk, "web")) continue;
+        if (!chunk) continue;
         cJSON *web = cJSON_GetObjectItem(chunk, "web");
-        if (!web || !cJSON_HasObjectItem(web, "uri")) continue;
+        if (!web) continue;
         cJSON *uri_json = cJSON_GetObjectItem(web, "uri");
         if (!uri_json || !cJSON_IsString(uri_json)) continue;
-        printf("[%d] %s\n", idx + 1, uri_json->valuestring);
+        cJSON *title_json = cJSON_GetObjectItem(web, "title");
+        std::string title_str = (title_json && cJSON_IsString(title_json)) ?
+            std::string(title_json->valuestring).substr(0, 255) : "";
+        std::string prefix = title_str.empty() ? "" : title_str + ": ";
+        std::string citation_line = "[" + std::to_string(idx + 1) + "] " + prefix +
+            uri_json->valuestring + "\n";
+        printf("%s", citation_line.c_str());
     }
 }
 
@@ -578,7 +184,6 @@ void process_full_buffer(HttpData* data) {
         data->response_buffer.clear();
         process_data_line(line, data);
     }
-    ESP_LOGI(TAG, "Stream processing complete. Final thoughts: %zu chars, answer: %zu chars", data->thoughts.length(), data->answer.length());
 }
 
 void http_task(void *pvParameters) {
@@ -642,9 +247,9 @@ void http_task(void *pvParameters) {
         ESP_LOGI(TAG, "Sending prompt: %s", line);
         esp_err_t err = esp_http_client_perform(client);
         process_full_buffer(&data);
+        int status_code = -1;
         if (err == ESP_OK) {
-            ESP_LOGI(TAG, "HTTP POST Status = %d",
-                     esp_http_client_get_status_code(client));
+            status_code = esp_http_client_get_status_code(client);
             printf("\n");
             if (data.grounding_metadata) {
                 print_citations(data.grounding_metadata);
@@ -652,6 +257,8 @@ void http_task(void *pvParameters) {
             } else {
                 printf("No grounding metadata available.\n");
             }
+            ESP_LOGI(TAG, "Stream processing complete. Final thoughts: %zu chars, answer: %zu chars", data.thoughts.length(), data.answer.length());
+            ESP_LOGI(TAG, "HTTP POST Status = %d", status_code);
         } else {
             ESP_LOGE(TAG, "HTTP POST failed: %s", esp_err_to_name(err));
         }
@@ -661,6 +268,49 @@ void http_task(void *pvParameters) {
         linenoiseHistoryAdd(line);
         free(line);
     }
+}
+
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                               int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ESP_LOGI(TAG, "WiFi connected, got IP");
+        if (wifi_connected != NULL) {
+            xSemaphoreGive(wifi_connected);
+        }
+    }
+}
+
+static void init_console(void) {
+    // Configure UART for console I/O
+    uart_config_t uart_config = {};
+    uart_config.baud_rate = 115200;
+    uart_config.data_bits = UART_DATA_8_BITS;
+    uart_config.parity = UART_PARITY_DISABLE;
+    uart_config.stop_bits = UART_STOP_BITS_1;
+    uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    uart_config.source_clk = UART_SCLK_APB;
+
+    ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
+    esp_vfs_dev_uart_use_driver(UART_NUM_0);
+
+    // Initialize console
+    esp_console_config_t console_config = {};
+    console_config.max_cmdline_length = 256;
+    console_config.max_cmdline_args = 8;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+    console_config.hint_color = atoi("36"); // ANSI color code for cyan
+#endif
+
+    ESP_ERROR_CHECK(esp_console_init(&console_config));
+
+    linenoiseSetMultiLine(1);
+    linenoiseHistorySetMaxLen(10);
+    linenoiseAllowEmpty(false);
 }
 
 extern "C" void app_main(void) {
@@ -692,10 +342,7 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(esp_wifi_start());
 
     wifi_connected = xSemaphoreCreateBinary();
-
-    init_display();
     
-    xTaskCreate(lvgl_task, "lvgl", 20 * 1024, NULL, 5, NULL);
     xTaskCreate(http_task, "http_task", 20 * 1024, NULL, 5, NULL);
 
     while (true) {

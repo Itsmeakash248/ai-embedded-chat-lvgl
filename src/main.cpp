@@ -3,18 +3,12 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
-#include <esp_timer.h>
 #include <stdlib.h>
-#include <esp_vfs_fat.h>
-#include <wear_levelling.h>
 #include <esp_log.h>
 #include <cJSON.h>
-#include <dirent.h>
 #include <cstdio>
 #include <cstring>
 #include <string>
-#include <vector>
-#include <algorithm>
 #include <set>
 #include "nvs_flash.h"
 #include "esp_netif.h"
@@ -49,11 +43,11 @@ void print_citations(cJSON* metadata) {
 
     int chunk_size = cJSON_GetArraySize(chunks);
     std::set<int> used_indices;
-    for (int i = 0; i < cJSON_GetArraySize(supports); i++) {
+    for (int i = 0; i < cJSON_GetArraySize(supports); ++i) {
         cJSON *sup = cJSON_GetArrayItem(supports, i);
         cJSON *indices = cJSON_GetObjectItem(sup, "groundingChunkIndices");
         if (!indices || !cJSON_IsArray(indices)) continue;
-        for (int k = 0; k < cJSON_GetArraySize(indices); k++) {
+        for (int k = 0; k < cJSON_GetArraySize(indices); ++k) {
             cJSON *i_json = cJSON_GetArrayItem(indices, k);
             if (!i_json || !cJSON_IsNumber(i_json)) continue;
             int idx = i_json->valueint;
@@ -68,11 +62,9 @@ void print_citations(cJSON* metadata) {
     printf("\nCitations:\n");
     for (int idx : used_indices) {
         cJSON *chunk = cJSON_GetArrayItem(chunks, idx);
-        if (!chunk) continue;
         cJSON *web = cJSON_GetObjectItem(chunk, "web");
-        if (!web) continue;
         cJSON *uri_json = cJSON_GetObjectItem(web, "uri");
-        if (!uri_json || !cJSON_IsString(uri_json)) continue;
+        if (!chunk || !web || !uri_json || !cJSON_IsString(uri_json)) continue;
         cJSON *title_json = cJSON_GetObjectItem(web, "title");
         std::string title_str = (title_json && cJSON_IsString(title_json)) ?
             std::string(title_json->valuestring).substr(0, 255) : "";
@@ -85,19 +77,11 @@ void print_citations(cJSON* metadata) {
 
 void process_data_line(const std::string& line, HttpData* data) {
     if (line.rfind("data: ", 0) != 0) {
-        return;  // Skip non-data lines
+        return;
     }
-    std::string json_str = line.substr(6);  // Skip "data: "
-    // Trim leading whitespace if any
-    size_t start = json_str.find_first_not_of(" \t");
-    if (start != std::string::npos) {
-        json_str = json_str.substr(start);
-    }
-    // Trim trailing whitespace if any
-    size_t end = json_str.find_last_not_of(" \t");
-    if (end != std::string::npos) {
-        json_str = json_str.substr(0, end + 1);
-    }
+    std::string json_str = line.substr(6);
+    json_str.erase(0, json_str.find_first_not_of(" \t"));
+    json_str.erase(json_str.find_last_not_of(" \t") + 1);
     if (json_str == "[DONE]") {
         return;
     }
@@ -119,24 +103,18 @@ void process_data_line(const std::string& line, HttpData* data) {
                         cJSON *thought_flag = cJSON_GetObjectItem(part, "thought");
                         cJSON *text = cJSON_GetObjectItem(part, "text");
                         if (text && cJSON_IsString(text)) {
-                            if (thought_flag && cJSON_IsBool(thought_flag) && cJSON_IsTrue(thought_flag)) {
-                                if (data->thoughts.empty()) {
-                                    printf("Thoughts :\n");
-                                }
-                                printf("%s", text->valuestring);
-                                data->thoughts += text->valuestring;
-                            } else {
-                                if (data->answer.empty()) {
-                                    printf("Answer:\n");
-                                }
-                                printf("%s", text->valuestring);
-                                data->answer += text->valuestring;
+                            bool is_thought = thought_flag && cJSON_IsBool(thought_flag) && cJSON_IsTrue(thought_flag);
+                            std::string& target = is_thought ? data->thoughts : data->answer;
+                            const char* header = is_thought ? "Thoughts :\n" : "Answer:\n";
+                            if (target.empty()) {
+                                printf("%s", header);
                             }
+                            printf("%s", text->valuestring);
+                            target += text->valuestring;
                         }
                     }
                 }
             }
-            // Handle grounding metadata
             cJSON *gmeta = cJSON_GetObjectItem(candidate, "groundingMetadata");
             if (gmeta && cJSON_IsObject(gmeta)) {
                 if (data->grounding_metadata) {
@@ -172,13 +150,11 @@ esp_err_t http_event_handler(esp_http_client_event_t *evt) {
 
 void process_full_buffer(HttpData* data) {
     size_t pos;
-    // Process any complete lines left in the buffer
     while ((pos = data->response_buffer.find('\n')) != std::string::npos) {
         std::string line = data->response_buffer.substr(0, pos);
         data->response_buffer.erase(0, pos + 1);
         process_data_line(line, data);
     }
-    // Handle any trailing incomplete line (e.g., last chunk without \n)
     if (!data->response_buffer.empty()) {
         std::string line = data->response_buffer;
         data->response_buffer.clear();
@@ -196,9 +172,8 @@ void http_task(void *pvParameters) {
 
     while (true) {
         char *line = linenoise("Enter prompt> ");
-        if (!line) continue;
-        if (strlen(line) == 0) {
-            free(line);
+        if (!line || strlen(line) == 0) {
+            if (line) free(line);
             continue;
         }
 
@@ -206,7 +181,6 @@ void http_task(void *pvParameters) {
         data.response_buffer.reserve(1024);
         data.grounding_metadata = nullptr;
 
-        // Build request JSON with user prompt
         cJSON *root = cJSON_CreateObject();
         cJSON *contents = cJSON_AddArrayToObject(root, "contents");
         cJSON *content = cJSON_CreateObject();
@@ -228,10 +202,7 @@ void http_task(void *pvParameters) {
         cJSON_Delete(root);
 
         char url[256];
-        snprintf(url, sizeof(url),
-                 "https://generativelanguage.googleapis.com/v1beta/models/"
-                 "gemini-flash-latest:streamGenerateContent?alt=sse&key=%s",
-                 API_KEY);
+        snprintf(url, sizeof(url), "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:streamGenerateContent?alt=sse&key=%s", API_KEY);
 
         esp_http_client_config_t config = {};
         config.url = url;
@@ -272,10 +243,10 @@ void http_task(void *pvParameters) {
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        esp_wifi_connect();
+    if (event_base == WIFI_EVENT) {
+        if (event_id == WIFI_EVENT_STA_START || event_id == WIFI_EVENT_STA_DISCONNECTED) {
+            esp_wifi_connect();
+        }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ESP_LOGI(TAG, "WiFi connected, got IP");
         if (wifi_connected != NULL) {
@@ -285,7 +256,6 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 }
 
 static void init_console(void) {
-    // Configure UART for console I/O
     uart_config_t uart_config = {};
     uart_config.baud_rate = 115200;
     uart_config.data_bits = UART_DATA_8_BITS;
@@ -298,12 +268,11 @@ static void init_console(void) {
     ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
     esp_vfs_dev_uart_use_driver(UART_NUM_0);
 
-    // Initialize console
     esp_console_config_t console_config = {};
     console_config.max_cmdline_length = 256;
     console_config.max_cmdline_args = 8;
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-    console_config.hint_color = atoi("36"); // ANSI color code for cyan
+    console_config.hint_color = atoi("36");
 #endif
 
     ESP_ERROR_CHECK(esp_console_init(&console_config));

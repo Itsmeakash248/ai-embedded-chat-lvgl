@@ -151,88 +151,17 @@ static void perform_calibration(uint16_t caldata[8]) {
     lcd.calibrateTouch(caldata, lcd.color565(255, 0, 0), lcd.color565(0, 0, 0), 20);
 }
 
-#include <string.h>  // Assuming this is needed for strcmp; add if not present
-
 lv_obj_t * home_list;
 lv_obj_t * home_cont;
 lv_obj_t * touch_ind;
 lv_obj_t * status_bar;
-lv_obj_t * settings_cont;
+lv_obj_t * gemini_cont;  // New global for Gemini screen container
 
 void cr_status_bar();
 void cr_home_scr();
-void cr_settings_scr();
-
-static void fade_out_home_cb(lv_anim_t * a);
-static void fade_out_settings_cb(lv_anim_t * a);
-
-static void event_handler(lv_event_t * e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t * obj = lv_event_get_target_obj(e);
-    if (code == LV_EVENT_CLICKED) {
-        const char * btn_text = lv_list_get_button_text(home_list, obj);
-        LV_LOG_USER("Clicked: %s", btn_text);
-        if (strcmp(btn_text, "Settings") == 0) {
-            lv_obj_set_style_opa(home_cont, LV_OPA_COVER, 0);
-            lv_anim_t a_out;
-            lv_anim_init(&a_out);
-            lv_anim_set_var(&a_out, home_cont);
-            lv_anim_set_values(&a_out, LV_OPA_COVER, LV_OPA_TRANSP);
-            lv_anim_set_time(&a_out, 300);
-            lv_anim_set_exec_cb(&a_out, (lv_anim_exec_xcb_t)lv_obj_set_style_opa);
-            lv_anim_set_ready_cb(&a_out, fade_out_home_cb);
-            lv_anim_start(&a_out);
-        }
-        // Add similar if statements for other buttons if needed (e.g., for "Gemini AI", "Weather", "About")
-    }
-}
-
-static void back_handler(lv_event_t * e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_CLICKED) {
-        lv_obj_set_style_opa(settings_cont, LV_OPA_COVER, 0);
-        lv_anim_t a_out;
-        lv_anim_init(&a_out);
-        lv_anim_set_var(&a_out, settings_cont);
-        lv_anim_set_values(&a_out, LV_OPA_COVER, LV_OPA_TRANSP);
-        lv_anim_set_time(&a_out, 300);
-        lv_anim_set_exec_cb(&a_out, (lv_anim_exec_xcb_t)lv_obj_set_style_opa);
-        lv_anim_set_ready_cb(&a_out, fade_out_settings_cb);
-        lv_anim_start(&a_out);
-    }
-}
-
-static void fade_out_home_cb(lv_anim_t * a)
-{
-    lv_obj_t * cont = (lv_obj_t *)a->var;
-    lv_obj_del(cont);
-    cr_settings_scr();
-    lv_obj_set_style_opa(settings_cont, LV_OPA_TRANSP, 0);
-    lv_anim_t a_in;
-    lv_anim_init(&a_in);
-    lv_anim_set_var(&a_in, settings_cont);
-    lv_anim_set_values(&a_in, LV_OPA_TRANSP, LV_OPA_COVER);
-    lv_anim_set_time(&a_in, 300);
-    lv_anim_set_exec_cb(&a_in, (lv_anim_exec_xcb_t)lv_obj_set_style_opa);
-    lv_anim_start(&a_in);
-}
-
-static void fade_out_settings_cb(lv_anim_t * a)
-{
-    lv_obj_t * cont = (lv_obj_t *)a->var;
-    lv_obj_del(cont);
-    cr_home_scr();
-    lv_obj_set_style_opa(home_cont, LV_OPA_TRANSP, 0);
-    lv_anim_t a_in;
-    lv_anim_init(&a_in);
-    lv_anim_set_var(&a_in, home_cont);
-    lv_anim_set_values(&a_in, LV_OPA_TRANSP, LV_OPA_COVER);
-    lv_anim_set_time(&a_in, 300);
-    lv_anim_set_exec_cb(&a_in, (lv_anim_exec_xcb_t)lv_obj_set_style_opa);
-    lv_anim_start(&a_in);
-}
+void cr_gemini_scr();
+static void open_gemini_cb(lv_event_t * e);
+static void close_gemini_cb(lv_event_t * e);
 
 void setup_home_scr(){
     cr_status_bar();
@@ -263,44 +192,79 @@ void cr_home_scr(){
     lv_obj_align(home_list, LV_ALIGN_TOP_MID, 0, 0);
 
     // Add buttons to the list
-    lv_obj_t * btn;
-    btn = lv_list_add_button(home_list, LV_SYMBOL_SETTINGS, "Settings");
-    lv_obj_add_event_cb(btn, event_handler, LV_EVENT_CLICKED, NULL);
-    btn = lv_list_add_button(home_list, LV_SYMBOL_CHARGE, "Gemini AI");
-    lv_obj_add_event_cb(btn, event_handler, LV_EVENT_CLICKED, NULL);
-    btn = lv_list_add_button(home_list, LV_SYMBOL_GPS, "Weather");
-    lv_obj_add_event_cb(btn, event_handler, LV_EVENT_CLICKED, NULL);
-    btn = lv_list_add_button(home_list, LV_SYMBOL_TINT, "About");
-    lv_obj_add_event_cb(btn, event_handler, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * settings_btn = lv_list_add_btn(home_list, LV_SYMBOL_SETTINGS, "Settings");
+    lv_obj_t * gemini_btn = lv_list_add_btn(home_list, LV_SYMBOL_CHARGE, "Gemini AI");
+    lv_obj_t * weather_btn = lv_list_add_btn(home_list, LV_SYMBOL_GPS, "Weather");
+    lv_obj_t * about_btn = lv_list_add_btn(home_list, LV_SYMBOL_TINT, "About");
+
+    // Add click event to Gemini button
+    lv_obj_add_event_cb(gemini_btn, open_gemini_cb, LV_EVENT_CLICKED, NULL);
 }
 
-void cr_settings_scr() {
-    settings_cont = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(settings_cont, LV_PCT(100), LV_PCT(85));
-    lv_obj_clear_flag(settings_cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_pad_all(settings_cont, 0, 0);
-    lv_obj_align_to(settings_cont, status_bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
+static void open_gemini_cb(lv_event_t * e) {
+    lv_obj_del(home_cont);
+    cr_gemini_scr();
+}
 
-    // Example settings content: a label and a back button
-    // You can expand this with a list, sliders, toggles, etc., as needed
+// Placeholder for send callback (implement as needed)
+static void send_message_cb(lv_event_t * e) {
+    lv_obj_t * ta = (lv_obj_t *)lv_event_get_user_data(e);
+    const char * text = lv_textarea_get_text(ta);
+    // Handle sending text to Gemini AI (e.g., via API call)
+    lv_textarea_set_text(ta, "");
+    // Add response handling here, e.g., append to chat area
+}
 
-    lv_obj_t * settings_label = lv_label_create(settings_cont);
-    lv_label_set_text(settings_label, "Settings Screen");
-    lv_obj_align(settings_label, LV_ALIGN_CENTER, 0, -20);
+void cr_gemini_scr() {
+    gemini_cont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(gemini_cont, LV_PCT(100), LV_PCT(85));
+    lv_obj_clear_flag(gemini_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(gemini_cont, 0, 0);
+    lv_obj_align_to(gemini_cont, status_bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
 
-    lv_obj_t * back_btn = lv_btn_create(settings_cont);
-    lv_obj_set_size(back_btn, LV_PCT(20), LV_PCT(8));
-    lv_obj_align(back_btn, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    // Close button (moved to top-right for input bar space)
+    lv_obj_t * close_btn = lv_btn_create(gemini_cont);
+    lv_obj_set_size(close_btn, LV_PCT(15), LV_PCT(15));
+    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -10, 10);
+    lv_obj_add_event_cb(close_btn, close_gemini_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t * back_label = lv_label_create(back_btn);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
+    lv_obj_t * close_label = lv_label_create(close_btn);
+    lv_label_set_text(close_label, "Close");
+    lv_obj_center(close_label);
 
-    lv_obj_add_event_cb(back_btn, back_handler, LV_EVENT_CLICKED, NULL);
+    // Input bar at bottom mid
+    lv_obj_t * input_cont = lv_obj_create(gemini_cont);
+    lv_obj_set_size(input_cont, LV_PCT(90), LV_PCT(15));
+    lv_obj_set_style_border_width(input_cont, 1, 0);
+    lv_obj_set_style_border_color(input_cont, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_pad_all(input_cont, 0, 0);
+    lv_obj_align(input_cont, LV_ALIGN_BOTTOM_MID, 0, -5);
 
-    // Optional: Add more settings buttons here, e.g.,
-    // lv_obj_t * wifi_btn = lv_btn_create(settings_cont);
-    // ... and add event handlers if needed
+    lv_obj_t * input_ta = lv_textarea_create(input_cont);
+    lv_textarea_set_placeholder_text(input_ta, "Type your message...");
+    lv_textarea_set_one_line(input_ta, true);
+    lv_obj_set_width(input_ta, LV_PCT(80));
+    lv_obj_set_height(input_ta, LV_PCT(100));
+    lv_obj_align(input_ta, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_clear_flag(input_ta, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Send button next to input
+    lv_obj_t * send_btn = lv_btn_create(input_cont);
+    lv_obj_set_width(send_btn, LV_PCT(20));
+    lv_obj_set_height(send_btn, LV_PCT(100));
+    lv_obj_set_style_pad_all(send_btn, 0, 0);
+    lv_obj_align(send_btn, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_add_event_cb(send_btn, send_message_cb, LV_EVENT_CLICKED, input_ta);  // Assuming send_message_cb handles sending
+
+    lv_obj_t * send_label = lv_label_create(send_btn);
+    lv_obj_set_style_pad_all(send_label, 0, 0);
+    lv_label_set_text(send_label, "Send");
+    lv_obj_center(send_label);
+}
+
+static void close_gemini_cb(lv_event_t * e) {
+    lv_obj_del(gemini_cont);
+    cr_home_scr();
 }
 
 void lvgl_task(void *pvParameters) {
